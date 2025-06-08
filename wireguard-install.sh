@@ -1,31 +1,90 @@
 #!/bin/bash
-
-# Secure WireGuard server installer
-# https://github.com/angristan/wireguard-install
-
 RED='\033[0;31m'
-ORANGE='\033[0;33m'
+YELLOW='\033[0;33m'
 GREEN='\033[0;32m'
-NC='\033[0m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Check for whiptail
+USE_WHIPTAIL=true
+if ! command -v whiptail &>/dev/null; then
+	echo -e "${YELLOW}Whiptail not found, falling back to standard prompts.${NC}"
+	USE_WHIPTAIL=false
+fi
+
+function prompt_message() {
+	local message="$1" color="${NC}"
+	case "$2" in
+	error) color="${RED}" ;;
+	warning) color="${YELLOW}" ;;
+	success) color="${GREEN}" ;;
+	info) color="${BLUE}" ;;
+	esac
+	if $USE_WHIPTAIL; then
+		whiptail --msgbox "$message" 15 80 --title "WireGuard Installer"
+	fi
+	printf "%b\n" "${color}${message}${NC}"
+}
+
+function prompt_input() {
+	local raw_prompt="$1" default="$2" INPUT EXITSTATUS prompt
+	prompt=$(printf "%b" "$raw_prompt")
+	if $USE_WHIPTAIL; then
+		INPUT=$(whiptail --inputbox "$prompt" 15 80 "$default" --title "WireGuard Installer" 3>&1 1>&2 2>&3)
+		EXITSTATUS=$?
+		if [ $EXITSTATUS -ne 0 ]; then
+			echo ""
+			return 1
+		fi
+	else
+		read -rp "$prompt " -e -i "$default" INPUT || return 1
+	fi
+	echo "$INPUT"
+	return 0
+}
+
+CONTINUE=""
+
+function prompt_yes_no() {
+	local raw_prompt="$1" default="$2" INPUT prompt
+	prompt=$(printf "%b" "$raw_prompt")
+	if $USE_WHIPTAIL; then
+		if [[ "$default" == "y" ]]; then
+			whiptail --yesno "$prompt" 15 80 --title "WireGuard Installer"
+		else
+			whiptail --yesno "$prompt" 15 80 --defaultno --title "WireGuard Installer"
+		fi
+
+		if [[ $? -eq 0 ]]; then
+			CONTINUE="y"
+		else
+			CONTINUE="n"
+		fi
+	else
+		read -rp "$prompt [y/n]: " -e -i "$default" INPUT
+		CONTINUE="${INPUT,,}"
+	fi
+}
 
 function isRoot() {
 	if [ "${EUID}" -ne 0 ]; then
-		echo "You need to run this script as root"
+		prompt_message "You need to run this script as root." error
 		exit 1
 	fi
 }
 
 function checkVirt() {
 	function openvzErr() {
-		echo "OpenVZ is not supported"
+		prompt_message "OpenVZ is not supported." error
 		exit 1
 	}
 	function lxcErr() {
-		echo "LXC is not supported (yet)."
-		echo "WireGuard can technically run in an LXC container,"
-		echo "but the kernel module has to be installed on the host,"
-		echo "the container has to be run with some specific parameters"
-		echo "and only the tools need to be installed in the container."
+		message="LXC is not supported (yet).\n\
+WireGuard can technically run in an LXC container,\n\
+but the kernel module has to be installed on the host,\n\
+the container has to be run with some specific parameters\n\
+and only the tools need to be installed in the container."
+		prompt_message "$message" error
 		exit 1
 	}
 	if command -v virt-what &>/dev/null; then
@@ -46,28 +105,33 @@ function checkVirt() {
 }
 
 function checkOS() {
-	source /etc/os-release
+	if [ -r /etc/os-release ]; then
+		source /etc/os-release
+	else
+		echo "/etc/os-release not found." >&2
+		exit 1
+	fi
 	OS="${ID}"
 	if [[ ${OS} == "debian" || ${OS} == "raspbian" ]]; then
 		if [[ ${VERSION_ID} -lt 10 ]]; then
-			echo "Your version of Debian (${VERSION_ID}) is not supported. Please use Debian 10 Buster or later"
+			prompt_message "Your version of Debian (${VERSION_ID}) is not supported. Please use Debian 10 Buster or later" error
 			exit 1
 		fi
 		OS=debian # overwrite if raspbian
 	elif [[ ${OS} == "ubuntu" ]]; then
 		RELEASE_YEAR=$(echo "${VERSION_ID}" | cut -d'.' -f1)
 		if [[ ${RELEASE_YEAR} -lt 18 ]]; then
-			echo "Your version of Ubuntu (${VERSION_ID}) is not supported. Please use Ubuntu 18.04 or later"
+			prompt_message "Your version of Ubuntu (${VERSION_ID}) is not supported. Please use Ubuntu 18.04 or later" error
 			exit 1
 		fi
 	elif [[ ${OS} == "fedora" ]]; then
 		if [[ ${VERSION_ID} -lt 32 ]]; then
-			echo "Your version of Fedora (${VERSION_ID}) is not supported. Please use Fedora 32 or later"
+			prompt_message "Your version of Fedora (${VERSION_ID}) is not supported. Please use Fedora 32 or later" error
 			exit 1
 		fi
 	elif [[ ${OS} == 'centos' ]] || [[ ${OS} == 'almalinux' ]] || [[ ${OS} == 'rocky' ]]; then
 		if [[ ${VERSION_ID} == 7* ]]; then
-			echo "Your version of CentOS (${VERSION_ID}) is not supported. Please use CentOS 8 or later"
+			prompt_message "Your version of CentOS (${VERSION_ID}) is not supported. Please use CentOS 8 or later" error
 			exit 1
 		fi
 	elif [[ -e /etc/oracle-release ]]; then
@@ -81,7 +145,7 @@ function checkOS() {
 			apk update && apk add virt-what
 		fi
 	else
-		echo "Looks like you aren't running this installer on a Debian, Ubuntu, Fedora, CentOS, AlmaLinux, Oracle or Arch Linux system"
+		prompt_message "Looks like you aren't running this installer on a Debian, Ubuntu, Fedora, CentOS, AlmaLinux, Oracle or Arch Linux system" error
 		exit 1
 	fi
 }
@@ -90,7 +154,7 @@ function getHomeDirForClient() {
 	local CLIENT_NAME=$1
 
 	if [ -z "${CLIENT_NAME}" ]; then
-		echo "Error: getHomeDirForClient() requires a client name as argument"
+		prompt_message "Error: getHomeDirForClient() requires a client name as argument" error
 		exit 1
 	fi
 
@@ -121,12 +185,15 @@ function initialCheck() {
 }
 
 function installQuestions() {
-	echo "Welcome to the WireGuard installer!"
-	echo "The git repository is available at: https://github.com/angristan/wireguard-install"
-	echo ""
-	echo "I need to ask you a few questions before starting the setup."
-	echo "You can keep the default options and just press enter if you are ok with them."
-	echo ""
+	message="Welcome to the WireGuard installer\n\n\
+This is a fork of the angristan/wireguard-install script that adds a CLI-based graphical interface using Whiptail for an improved user experience. If Whiptail is not available on the system, the script gracefully falls back to the original standard prompts."
+	prompt_message "$message" info
+
+	prompt_yes_no "Do you want to continue?" "y"
+	if [[ "$CONTINUE" != "y" ]]; then
+		prompt_message "Installation aborted!" info
+		exit 0
+	fi
 
 	# Detect public IPv4 or IPv6 address and pre-fill for the user
 	SERVER_PUB_IP=$(ip -4 addr | sed -ne 's|^.* inet \([^/]*\)/.* scope global.*$|\1|p' | awk '{print $1}' | head -1)
@@ -134,55 +201,79 @@ function installQuestions() {
 		# Detect public IPv6 address
 		SERVER_PUB_IP=$(ip -6 addr | sed -ne 's|^.* inet6 \([^/]*\)/.* scope global.*$|\1|p' | head -1)
 	fi
-	read -rp "IPv4 or IPv6 public address: " -e -i "${SERVER_PUB_IP}" SERVER_PUB_IP
+	SERVER_PUB_IP=$(prompt_input "IPv4 or IPv6 public address:" "$SERVER_PUB_IP") || {
+		prompt_message "Installation aborted!" info
+		exit 0
+	}
 
 	# Detect public interface and pre-fill for the user
 	SERVER_NIC="$(ip -4 route ls | grep default | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -1)"
 	until [[ ${SERVER_PUB_NIC} =~ ^[a-zA-Z0-9_]+$ ]]; do
-		read -rp "Public interface: " -e -i "${SERVER_NIC}" SERVER_PUB_NIC
+		SERVER_PUB_NIC=$(prompt_input "Public interface:" "$SERVER_NIC") || {
+			prompt_message "Installation aborted!" info
+			exit 0
+		}
+
 	done
 
 	until [[ ${SERVER_WG_NIC} =~ ^[a-zA-Z0-9_]+$ && ${#SERVER_WG_NIC} -lt 16 ]]; do
-		read -rp "WireGuard interface name: " -e -i wg0 SERVER_WG_NIC
+		SERVER_WG_NIC=$(prompt_input "WireGuard interface name:" "wg0") || {
+			prompt_message "Installation aborted!" info
+			exit 0
+		}
 	done
 
 	until [[ ${SERVER_WG_IPV4} =~ ^([0-9]{1,3}\.){3} ]]; do
-		read -rp "Server WireGuard IPv4: " -e -i 10.66.66.1 SERVER_WG_IPV4
+		SERVER_WG_IPV4=$(prompt_input "Server WireGuard IPv4:" "10.66.66.1") || {
+			prompt_message "Installation aborted!" info
+			exit 0
+		}
 	done
 
 	until [[ ${SERVER_WG_IPV6} =~ ^([a-f0-9]{1,4}:){3,4}: ]]; do
-		read -rp "Server WireGuard IPv6: " -e -i fd42:42:42::1 SERVER_WG_IPV6
+		SERVER_WG_IPV6=$(prompt_input "Server WireGuard IPv6:" "fd42:42:42::1") || {
+			prompt_message "Installation aborted!" info
+			exit 0
+		}
 	done
 
 	# Generate random number within private ports range
-	RANDOM_PORT=$(shuf -i49152-65535 -n1)
 	until [[ ${SERVER_PORT} =~ ^[0-9]+$ ]] && [ "${SERVER_PORT}" -ge 1 ] && [ "${SERVER_PORT}" -le 65535 ]; do
-		read -rp "Server WireGuard port [1-65535]: " -e -i "${RANDOM_PORT}" SERVER_PORT
+		SERVER_PORT=$(prompt_input "Server WireGuard port [1-65535]:" "$(shuf -i49152-65535 -n1)") || {
+			prompt_message "Installation aborted!" info
+			exit 0
+		}
 	done
 
 	# Adguard DNS by default
 	until [[ ${CLIENT_DNS_1} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; do
-		read -rp "First DNS resolver to use for the clients: " -e -i 1.1.1.1 CLIENT_DNS_1
+		CLIENT_DNS_1=$(prompt_input "First DNS resolver for clients:" "1.1.1.1") || {
+			prompt_message "Installation aborted!" info
+			exit 0
+		}
 	done
 	until [[ ${CLIENT_DNS_2} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; do
-		read -rp "Second DNS resolver to use for the clients (optional): " -e -i 1.0.0.1 CLIENT_DNS_2
+		CLIENT_DNS_2=$(prompt_input "Second DNS resolver (optional):" "1.0.0.1") || {
+			prompt_message "Installation aborted!" info
+			exit 0
+		}
 		if [[ ${CLIENT_DNS_2} == "" ]]; then
 			CLIENT_DNS_2="${CLIENT_DNS_1}"
 		fi
 	done
 
 	until [[ ${ALLOWED_IPS} =~ ^.+$ ]]; do
-		echo -e "\nWireGuard uses a parameter called AllowedIPs to determine what is routed over the VPN."
-		read -rp "Allowed IPs list for generated clients (leave default to route everything): " -e -i '0.0.0.0/0,::/0' ALLOWED_IPS
+		message="WireGuard uses a parameter called AllowedIPs to determine what is routed over the VPN.\n\nAllowed IPs list for generated clients (default route everything):"
+		ALLOWED_IPS=$(prompt_input "$message" "0.0.0.0/0,::/0") || {
+			prompt_message "Installation aborted!" info
+			exit 0
+		}
 		if [[ ${ALLOWED_IPS} == "" ]]; then
 			ALLOWED_IPS="0.0.0.0/0,::/0"
 		fi
 	done
 
-	echo ""
-	echo "Okay, that was all I needed. We are ready to setup your WireGuard server now."
-	echo "You will be able to generate a client at the end of the installation."
-	read -n1 -r -p "Press any key to continue..."
+	prompt_message "All set! Ready to install WireGuard." success
 }
 
 function installWireGuard() {
@@ -293,7 +384,7 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/wg.conf
 	fi
 
 	newClient
-	echo -e "${GREEN}If you want to add more clients, you simply need to run this script another time!${NC}"
+	prompt_message "If you want to add more clients, you simply need to run this script another time!" success
 
 	# Check if WireGuard is running
 	if [[ ${OS} == 'alpine' ]]; then
@@ -305,21 +396,21 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/wg.conf
 
 	# WireGuard might not work if we updated the kernel. Tell the user to reboot
 	if [[ ${WG_RUNNING} -ne 0 ]]; then
-		echo -e "\n${RED}WARNING: WireGuard does not seem to be running.${NC}"
+		prompt_message "WireGuard does not seem to be running." warning
 		if [[ ${OS} == 'alpine' ]]; then
-			echo -e "${ORANGE}You can check if WireGuard is running with: rc-service wg-quick.${SERVER_WG_NIC} status${NC}"
+			prompt_message "You can check if WireGuard is running with: rc-service wg-quick.${SERVER_WG_NIC} status" warning
 		else
-			echo -e "${ORANGE}You can check if WireGuard is running with: systemctl status wg-quick@${SERVER_WG_NIC}${NC}"
+			prompt_message "You can check if WireGuard is running with: systemctl status wg-quick@${SERVER_WG_NIC}" warning
 		fi
-		echo -e "${ORANGE}If you get something like \"Cannot find device ${SERVER_WG_NIC}\", please reboot!${NC}"
+		prompt_message "If you get something like \"Cannot find device ${SERVER_WG_NIC}\", please reboot!" warning
 	else # WireGuard is running
-		echo -e "\n${GREEN}WireGuard is running.${NC}"
+		prompt_message "WireGuard is running." success
 		if [[ ${OS} == 'alpine' ]]; then
-			echo -e "${GREEN}You can check the status of WireGuard with: rc-service wg-quick.${SERVER_WG_NIC} status\n\n${NC}"
+			prompt_message "You can check the status of WireGuard with: rc-service wg-quick.${SERVER_WG_NIC} status" info
 		else
-			echo -e "${GREEN}You can check the status of WireGuard with: systemctl status wg-quick@${SERVER_WG_NIC}\n\n${NC}"
+			prompt_message "You can check the status of WireGuard with: systemctl status wg-quick@${SERVER_WG_NIC}" info
 		fi
-		echo -e "${ORANGE}If you don't have internet connectivity from your client, try to reboot the server.${NC}"
+		prompt_message "If you don't have internet connectivity from your client, try to reboot the server." warning
 	fi
 }
 
@@ -332,19 +423,17 @@ function newClient() {
 	fi
 	ENDPOINT="${SERVER_PUB_IP}:${SERVER_PORT}"
 
-	echo ""
-	echo "Client configuration"
-	echo ""
-	echo "The client name must consist of alphanumeric character(s). It may also include underscores or dashes and can't exceed 15 chars."
-
 	until [[ ${CLIENT_NAME} =~ ^[a-zA-Z0-9_-]+$ && ${CLIENT_EXISTS} == '0' && ${#CLIENT_NAME} -lt 16 ]]; do
-		read -rp "Client name: " -e CLIENT_NAME
+		CLIENT_NAME=$(prompt_input "Client configuration\n\
+The client name must consist of alphanumeric character(s). It may also include underscores or dashes and can't exceed 15 chars.\n\n\
+Client name:" "${CLIENT_NAME}") || {
+			prompt_message "Installation aborted!" info
+			exit 0
+		}
 		CLIENT_EXISTS=$(grep -c -E "^### Client ${CLIENT_NAME}\$" "/etc/wireguard/${SERVER_WG_NIC}.conf")
 
 		if [[ ${CLIENT_EXISTS} != 0 ]]; then
-			echo ""
-			echo -e "${ORANGE}A client with the specified name was already created, please choose another name.${NC}"
-			echo ""
+			prompt_message "A client with the specified name was already created, please choose another name." warning
 		fi
 	done
 
@@ -356,34 +445,35 @@ function newClient() {
 	done
 
 	if [[ ${DOT_EXISTS} == '1' ]]; then
-		echo ""
-		echo "The subnet configured supports only 253 clients."
+		prompt_message "The subnet configured supports only 253 clients." error
 		exit 1
 	fi
 
 	BASE_IP=$(echo "$SERVER_WG_IPV4" | awk -F '.' '{ print $1"."$2"."$3 }')
 	until [[ ${IPV4_EXISTS} == '0' ]]; do
-		read -rp "Client WireGuard IPv4: ${BASE_IP}." -e -i "${DOT_IP}" DOT_IP
+		DOT_IP=$(prompt_input "Client WireGuard IPv4: ${BASE_IP}." "${DOT_IP}") || {
+			prompt_message "Installation aborted!" info
+			exit 0
+		}
 		CLIENT_WG_IPV4="${BASE_IP}.${DOT_IP}"
 		IPV4_EXISTS=$(grep -c "$CLIENT_WG_IPV4/32" "/etc/wireguard/${SERVER_WG_NIC}.conf")
 
 		if [[ ${IPV4_EXISTS} != 0 ]]; then
-			echo ""
-			echo -e "${ORANGE}A client with the specified IPv4 was already created, please choose another IPv4.${NC}"
-			echo ""
+			prompt_message "A client with the specified IPv4 was already created, please choose another IPv4." warning
 		fi
 	done
 
 	BASE_IP=$(echo "$SERVER_WG_IPV6" | awk -F '::' '{ print $1 }')
 	until [[ ${IPV6_EXISTS} == '0' ]]; do
-		read -rp "Client WireGuard IPv6: ${BASE_IP}::" -e -i "${DOT_IP}" DOT_IP
+		DOT_IP=$(prompt_input "Client WireGuard IPv6: ${BASE_IP}::" "${DOT_IP}") || {
+			prompt_message "Installation aborted!" info
+			exit 0
+		}
 		CLIENT_WG_IPV6="${BASE_IP}::${DOT_IP}"
 		IPV6_EXISTS=$(grep -c "${CLIENT_WG_IPV6}/128" "/etc/wireguard/${SERVER_WG_NIC}.conf")
 
 		if [[ ${IPV6_EXISTS} != 0 ]]; then
-			echo ""
-			echo -e "${ORANGE}A client with the specified IPv6 was already created, please choose another IPv6.${NC}"
-			echo ""
+			prompt_message "A client with the specified IPv6 was already created, please choose another IPv6." warning
 		fi
 	done
 
@@ -417,19 +507,17 @@ AllowedIPs = ${CLIENT_WG_IPV4}/32,${CLIENT_WG_IPV6}/128" >>"/etc/wireguard/${SER
 
 	# Generate QR code if qrencode is installed
 	if command -v qrencode &>/dev/null; then
-		echo -e "${GREEN}\nHere is your client config file as a QR Code:\n${NC}"
-		qrencode -t ansiutf8 -l L <"${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf"
-		echo ""
+		echo "Here is your client config file as a QR Code:"
+		qrencode -t ansiutf8 -l L <"${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf" # cant display this in whiptail
 	fi
 
-	echo -e "${GREEN}Your client config file is in ${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf${NC}"
+	prompt_message "Your client config file is in ${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf" success
 }
 
 function listClients() {
 	NUMBER_OF_CLIENTS=$(grep -c -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC}.conf")
 	if [[ ${NUMBER_OF_CLIENTS} -eq 0 ]]; then
-		echo ""
-		echo "You have no existing clients!"
+		prompt_message "You have no existing clients!" info
 		exit 1
 	fi
 
@@ -439,19 +527,19 @@ function listClients() {
 function revokeClient() {
 	NUMBER_OF_CLIENTS=$(grep -c -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC}.conf")
 	if [[ ${NUMBER_OF_CLIENTS} == '0' ]]; then
-		echo ""
-		echo "You have no existing clients!"
+		prompt_message "You have no existing clients!" info
 		exit 1
 	fi
 
-	echo ""
-	echo "Select the existing client you want to revoke"
+	prompt_message "Select the existing client you want to revoke" info
 	grep -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC}.conf" | cut -d ' ' -f 3 | nl -s ') '
 	until [[ ${CLIENT_NUMBER} -ge 1 && ${CLIENT_NUMBER} -le ${NUMBER_OF_CLIENTS} ]]; do
 		if [[ ${CLIENT_NUMBER} == '1' ]]; then
-			read -rp "Select one client [1]: " CLIENT_NUMBER
+			#read -rp "Select one client [1]: " CLIENT_NUMBER
+			CLIENT_NUMBER=$(prompt_input "Select one client [1]: " "1")
 		else
-			read -rp "Select one client [1-${NUMBER_OF_CLIENTS}]: " CLIENT_NUMBER
+			#read -rp "Select one client [1-${NUMBER_OF_CLIENTS}]: " CLIENT_NUMBER
+			CLIENT_NUMBER=$(prompt_input "Select one client [1-${NUMBER_OF_CLIENTS}]: " "1")
 		fi
 	done
 
@@ -470,12 +558,16 @@ function revokeClient() {
 }
 
 function uninstallWg() {
-	echo ""
-	echo -e "\n${RED}WARNING: This will uninstall WireGuard and remove all the configuration files!${NC}"
-	echo -e "${ORANGE}Please backup the /etc/wireguard directory if you want to keep your configuration files.\n${NC}"
-	read -rp "Do you really want to remove WireGuard? [y/n]: " -e REMOVE
-	REMOVE=${REMOVE:-n}
-	if [[ $REMOVE == 'y' ]]; then
+	message="WARNING: This will uninstall WireGuard and remove all the configuration files.\n\
+Please backup the /etc/wireguard directory if you want to keep your configuration files."
+	prompt_message "$message" warning
+	CONTINUE=""
+	prompt_yes_no "Do you really want to remove WireGuard?" "n"
+	if [[ "$CONTINUE" == "n" ]]; then
+		prompt_message "Uninstall aborted!" info
+		exit 0
+	fi
+	if [[ $CONTINUE == 'y' ]]; then
 		checkOS
 
 		if [[ ${OS} == 'alpine' ]]; then
@@ -528,33 +620,41 @@ function uninstallWg() {
 		WG_RUNNING=$?
 
 		if [[ ${WG_RUNNING} -eq 0 ]]; then
-			echo "WireGuard failed to uninstall properly."
+			prompt_message "WireGuard failed to uninstall properly." error
 			exit 1
 		else
-			echo "WireGuard uninstalled successfully."
+			prompt_message "WireGuard uninstalled successfully." success
 			exit 0
 		fi
 	else
-		echo ""
-		echo "Removal aborted!"
+		prompt_message "Removal aborted!" info
 	fi
 }
 
 function manageMenu() {
-	echo "Welcome to WireGuard-install!"
-	echo "The git repository is available at: https://github.com/angristan/wireguard-install"
-	echo ""
-	echo "It looks like WireGuard is already installed."
-	echo ""
-	echo "What do you want to do?"
-	echo "   1) Add a new user"
-	echo "   2) List all users"
-	echo "   3) Revoke existing user"
-	echo "   4) Uninstall WireGuard"
-	echo "   5) Exit"
-	until [[ ${MENU_OPTION} =~ ^[1-5]$ ]]; do
-		read -rp "Select an option [1-5]: " MENU_OPTION
-	done
+	if $USE_WHIPTAIL; then
+		MENU_OPTION=$(whiptail --title "WireGuard-install Menu" --menu "Select an option:" 15 60 5 \
+			"1" "Add a new user" \
+			"2" "List all users" \
+			"3" "Revoke existing user" \
+			"4" "Uninstall WireGuard" \
+			"5" "Exit" 3>&1 1>&2 2>&3)
+	else
+		echo "Welcome to WireGuard-install!"
+		echo "The git repository is available at: https://github.com/mazurky/wireguard-install"
+		echo ""
+		echo "It looks like WireGuard is already installed."
+		echo ""
+		echo "What do you want to do?"
+		echo "   1) Add a new user"
+		echo "   2) List all users"
+		echo "   3) Revoke existing user"
+		echo "   4) Uninstall WireGuard"
+		echo "   5) Exit"
+		until [[ ${MENU_OPTION} =~ ^[1-5]$ ]]; do
+			read -rp "Select an option [1-5]: " MENU_OPTION
+		done
+	fi
 	case "${MENU_OPTION}" in
 	1)
 		newClient
@@ -571,13 +671,14 @@ function manageMenu() {
 	5)
 		exit 0
 		;;
+	*)
+		prompt_message "Invalid option selected." warning
+		;;
 	esac
 }
 
-# Check for root, virt, OS...
 initialCheck
 
-# Check if WireGuard is already installed and load params
 if [[ -e /etc/wireguard/params ]]; then
 	source /etc/wireguard/params
 	manageMenu
